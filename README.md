@@ -42,5 +42,6 @@ python main.py
 <img width="776" height="604" alt="image" src="https://github.com/user-attachments/assets/68e50ceb-406d-4c3d-bb9c-f526da6cc169" />
 
 *Color Segmentation Interface*
-<img width="780" height="608" alt="image" src="https://github.com/user-attachments/assets/29536f6e-c91e-4e09-90e1-53354b3827d5" />
+<img width="777" height="606" alt="image" src="https://github.com/user-attachments/assets/09c369ae-21bf-43b5-82bc-fb363a4040bf" />
+
 
