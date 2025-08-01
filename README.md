@@ -39,13 +39,9 @@ python main.py
 ## Screenshots
 
 *Template Matching Interface*
-<img width="650" alt="Template Matching Interface" src="https://github.com/user-attachments/assets/dd2d38ab-c795-477c-abf4-afe804f24d2d" />
+<img width="776" height="604" alt="image" src="https://github.com/user-attachments/assets/68e50ceb-406d-4c3d-bb9c-f526da6cc169" />
 
 *Color Segmentation Interface*
-<img width="650" alt="Color Segmentation Interface" src="https://github.com/user-attachments/assets/your-second-screenshot-url" />
-  - Robust algorithms with fallback mechanisms
-
-<img width="776" height="604" alt="image" src="https://github.com/user-attachments/assets/68e50ceb-406d-4c3d-bb9c-f526da6cc169" />
 <img width="780" height="608" alt="image" src="https://github.com/user-attachments/assets/29536f6e-c91e-4e09-90e1-53354b3827d5" />
 
 
