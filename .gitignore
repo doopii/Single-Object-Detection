@@ -1,1 +1,8 @@
 trash/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.vscode/
+.env
+*.log
