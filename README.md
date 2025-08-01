@@ -44,6 +44,3 @@ python main.py
 *Color Segmentation Interface*
 <img width="780" height="608" alt="image" src="https://github.com/user-attachments/assets/29536f6e-c91e-4e09-90e1-53354b3827d5" />
 
-
-
->>>>>>> 5cbfa30f2b87406000fa53381fe18ebadc60b7dd
