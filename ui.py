@@ -34,6 +34,7 @@ class ObjectDetectorApp:
         self.min_area = tk.IntVar(value=200)        # Increased to filter noise
         self.erosion_iterations = tk.IntVar(value=2)  # More cleanup
         self.dilation_iterations = tk.IntVar(value=3) # Better gap filling
+        self.use_watershed = tk.BooleanVar(value=False)  # Watershed segmentation
 
         # Detection method selection
         self.detection_method = tk.StringVar(value="template")
@@ -45,6 +46,7 @@ class ObjectDetectorApp:
         self.brightness = tk.IntVar(value=0)
         self.contrast = tk.DoubleVar(value=1.0)
         self.gaussian_blur = tk.IntVar(value=0)
+        self.median_filter = tk.IntVar(value=0)
         self.sharpen = tk.BooleanVar(value=False)
         self.denoise = tk.BooleanVar(value=False)
         self.preprocessing_enabled = tk.BooleanVar(value=False)
@@ -116,6 +118,13 @@ class ObjectDetectorApp:
 
         load_btn = ttk.Button(content_frame, text="Load Image", command=self.load_image)
         load_btn.pack(fill="x", pady=(0,10))
+        
+        # Instructions label
+        self.instructions_label = ttk.Label(content_frame, 
+                                          text="Load → Select → Detect", 
+                                          font=("Arial", 9), 
+                                          foreground="blue")
+        self.instructions_label.pack(anchor="w", pady=(0,10))
 
         # Sidebar Navigation
         ttk.Label(sidebar_frame, text="Sections", font=("Arial", 11, "bold")).pack(anchor="w", pady=(0,5))
@@ -212,7 +221,7 @@ class ObjectDetectorApp:
         self.contrast_entry.bind("<Return>", self.on_contrast_entry)
 
         # Filtering
-        filter_frame = ttk.LabelFrame(self.preprocess_frame, text="Noise Reduction & Enhancement")
+        filter_frame = ttk.LabelFrame(self.preprocess_frame, text="Blur & Noise Reduction")
         filter_frame.pack(fill="x", pady=5)
 
         # Gaussian blur
@@ -227,12 +236,24 @@ class ObjectDetectorApp:
         self.blur_entry.insert(0, str(self.gaussian_blur.get()))
         self.blur_entry.bind("<Return>", self.on_blur_entry)
 
+        # Median filter
+        ttk.Label(filter_frame, text="Median Filter:").pack(anchor="w", padx=5)
+        median_frame = ttk.Frame(filter_frame)
+        median_frame.pack(fill="x", padx=5, pady=(0,5))
+        self.median_slider = ttk.Scale(median_frame, from_=0, to=15, orient="horizontal",
+                                     variable=self.median_filter, command=self.on_median_change)
+        self.median_slider.pack(side="left", fill="x", expand=True)
+        self.median_entry = ttk.Entry(median_frame, width=6)
+        self.median_entry.pack(side="left", padx=(5,0))
+        self.median_entry.insert(0, str(self.median_filter.get()))
+        self.median_entry.bind("<Return>", self.on_median_entry)
+
         # Advanced options
         self.sharpen_chk = ttk.Checkbutton(filter_frame, text="Sharpen image",
                                           variable=self.sharpen, command=self.on_sharpen_change)
         self.sharpen_chk.pack(anchor="w", padx=5, pady=2)
 
-        self.denoise_chk = ttk.Checkbutton(filter_frame, text="Reduce noise",
+        self.denoise_chk = ttk.Checkbutton(filter_frame, text="Non-local means denoising",
                                           variable=self.denoise, command=self.on_denoise_change)
         self.denoise_chk.pack(anchor="w", padx=5, pady=2)
 
@@ -264,8 +285,6 @@ class ObjectDetectorApp:
         self.edge_chk = ttk.Checkbutton(app_frame, text="Detect by edge shape matching",
                                     variable=self.use_edge, command=self.appearance_changed)
         self.edge_chk.pack(anchor="w", padx=5, pady=2)
-
-        ttk.Label(app_frame, text="(Select one or more)").pack(anchor="w", padx=5)
 
         flex_frame = ttk.LabelFrame(self.template_frame, text="Detection Flexibility")
         flex_frame.pack(fill="x", pady=5)
@@ -362,6 +381,14 @@ class ObjectDetectorApp:
         self.dilation_entry.pack(side="left", padx=(5,0))
         self.dilation_entry.insert(0, str(self.dilation_iterations.get()))
         self.dilation_entry.bind("<Return>", self.on_dilation_entry)
+
+        # Advanced segmentation options
+        advanced_frame = ttk.LabelFrame(self.color_frame, text="Advanced Options")
+        advanced_frame.pack(fill="x", pady=5)
+
+        self.watershed_chk = ttk.Checkbutton(advanced_frame, text="Watershed",
+                                           variable=self.use_watershed, command=self.on_watershed_change)
+        self.watershed_chk.pack(anchor="w", padx=5, pady=5)
 
     def switch_section(self, section):
         """Switch to a different settings section"""
@@ -461,10 +488,26 @@ class ObjectDetectorApp:
         self.scale_value_label.config(text=f"{percent:.0f}%")
 
     def update_controls_state(self):
-        state = "normal" if self.roi is not None else "disabled"
-        self.apply_btn.config(state=state)
-        self.reset_btn.config(state=state)
-        self.save_btn.config(state=state if (self.result_image is not None) else "disabled")
+        if self.img is None:
+            # No image loaded
+            state = "disabled"
+            self.apply_btn.config(state=state)
+            self.reset_btn.config(state=state)
+            self.save_btn.config(state=state)
+            self.instructions_label.config(text="Load an image")
+        elif self.roi is None:
+            # Image loaded but no ROI selected
+            state = "disabled"
+            self.apply_btn.config(state=state)
+            self.reset_btn.config(state="normal")  # Can reset even without ROI
+            self.save_btn.config(state="disabled")
+            self.instructions_label.config(text="Select an object")
+        else:
+            # Image loaded and ROI selected
+            self.apply_btn.config(state="normal")
+            self.reset_btn.config(state="normal")
+            self.save_btn.config(state="normal" if (self.result_image is not None) else "disabled")
+            self.instructions_label.config(text="Ready to detect")
 
     def draw_image(self, img):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -607,6 +650,13 @@ class ObjectDetectorApp:
             self.dilation_entry.delete(0, tk.END)
             self.dilation_entry.insert(0, str(self.dilation_iterations.get()))
 
+    def on_watershed_change(self):
+        """Callback for watershed checkbox change"""
+        if self.use_watershed.get():
+            self.status_label.config(text="Watershed enabled - will separate touching objects.")
+        else:
+            self.status_label.config(text="Watershed disabled - faster processing.")
+
     def apply_detection(self, method="template"):
         if self.roi is None:
             messagebox.showinfo("Select Object", "Please select an object in the image first.")
@@ -680,7 +730,8 @@ class ObjectDetectorApp:
                 "color_tolerance": self.color_tolerance.get(),
                 "min_area": self.min_area.get(),
                 "erosion_iterations": self.erosion_iterations.get(),
-                "dilation_iterations": self.dilation_iterations.get()
+                "dilation_iterations": self.dilation_iterations.get(),
+                "use_watershed": self.use_watershed.get()
             }
             matcher = ColorSegmentationMatcher(self.img, self.roi, params)
             boxes, detected_img = matcher.detect()
@@ -774,6 +825,33 @@ class ObjectDetectorApp:
             self.blur_entry.delete(0, tk.END)
             self.blur_entry.insert(0, str(self.gaussian_blur.get()))
 
+    def on_median_change(self, value):
+        # Ensure odd kernel size for median filter
+        val = int(float(value))
+        if val > 0 and val % 2 == 0:
+            val += 1  # Make it odd
+        self.median_entry.delete(0, tk.END)
+        self.median_entry.insert(0, str(val))
+        self.median_filter.set(val)
+        if self.preprocessing_enabled.get():
+            self.apply_preprocessing_live()
+
+    def on_median_entry(self, event):
+        try:
+            value = int(self.median_entry.get())
+            value = max(0, min(15, value))
+            # Ensure odd kernel size for median filter
+            if value > 0 and value % 2 == 0:
+                value += 1  # Make it odd
+            self.median_filter.set(value)
+            self.median_entry.delete(0, tk.END)
+            self.median_entry.insert(0, str(value))
+            if self.preprocessing_enabled.get():
+                self.apply_preprocessing_live()
+        except ValueError:
+            self.median_entry.delete(0, tk.END)
+            self.median_entry.insert(0, str(self.median_filter.get()))
+
     def on_sharpen_change(self):
         if self.preprocessing_enabled.get():
             self.apply_preprocessing_live()
@@ -808,14 +886,25 @@ class ObjectDetectorApp:
 
     def apply_preprocessing_to_image(self, img):
         """Apply all preprocessing steps to an image using preprocessing module"""
-        return apply_image_preprocessing(
+        processed = apply_image_preprocessing(
             img,
             brightness=self.brightness.get(),
             contrast=self.contrast.get(),
             blur=self.gaussian_blur.get(),
+            blur_type="gaussian",
             sharpen=self.sharpen.get(),
             denoise=self.denoise.get()
         )
+        
+        # Apply median filter separately if enabled
+        if self.median_filter.get() > 0:
+            kernel_size = self.median_filter.get()
+            # Ensure odd kernel size
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            processed = cv2.medianBlur(processed, kernel_size)
+        
+        return processed
 
     def reset_preprocessing_settings(self):
         """Reset all preprocessing settings to default values"""
@@ -823,6 +912,7 @@ class ObjectDetectorApp:
         self.brightness.set(0)
         self.contrast.set(1.0)
         self.gaussian_blur.set(0)
+        self.median_filter.set(0)
         self.sharpen.set(False)
         self.denoise.set(False)
         self.preprocessing_enabled.set(False)
@@ -836,6 +926,9 @@ class ObjectDetectorApp:
         
         self.blur_entry.delete(0, tk.END)
         self.blur_entry.insert(0, "0")
+        
+        self.median_entry.delete(0, tk.END)
+        self.median_entry.insert(0, "0")
         
         # Reset to original image
         if hasattr(self, 'orig_img') and self.orig_img is not None:

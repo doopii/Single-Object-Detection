@@ -18,25 +18,25 @@ class TemplateMatcher:
         detected_points = []
         method = cv2.TM_CCOEFF_NORMED
 
-        # Optimize scales - reduce number of scale steps for performance
+        # Configure scale parameters for multi-scale detection
         scales = [1.0]
         if multi_scale:
-            # Reduced step size and limited range for better performance
             step = 0.1 
             scale_min = max(0.3, 1 - scale_r) 
             scale_max = min(1.7, 1 + scale_r)  
             scales = np.arange(scale_min, scale_max + step, step)
-            # Limit to maximum 8 scales for performance
+            # Limit scales for performance optimization
             if len(scales) > 8:
                 scales = np.linspace(scale_min, scale_max, 8)
 
-        # Pre-process images once
+        # Pre-process images for different detection methods
         if methods["grayscale"]:
             img_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         if methods["edge"]:
             img_edge = cv2.Canny(self.image, 100, 200)
 
         def rotated_templates(template):
+            """Generate rotated versions of template for rotation invariant detection"""
             angles = range(0, 360, 30) if rot_inv else [0]
             if multi_scale and len(scales) > 4:
                 angles = range(0, 360, 45) 
@@ -49,10 +49,11 @@ class TemplateMatcher:
                     rotated = cv2.warpAffine(template, M, (template.shape[1], template.shape[0]))
                     yield rotated
 
-        # Process each method
+        # Process each enabled detection method
         active_methods = [name for name, use in methods.items() if use]
         
         for method_name in active_methods:
+            # Select appropriate template and search image based on method
             if method_name == "grayscale":
                 base_template = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
                 search_img = img_gray
@@ -65,15 +66,16 @@ class TemplateMatcher:
             else:
                 continue
 
-            # Skip if template is too small after edge detection
+            # Skip edge templates that are too small
             if method_name == "edge" and (base_template.shape[0] < 10 or base_template.shape[1] < 10):
                 continue
 
+            # Multi-scale template matching
             for scale in scales:
                 if scale != 1.0:
-                    new_w = max(10, int(base_template.shape[1] * scale))  # Minimum size check
+                    new_w = max(10, int(base_template.shape[1] * scale))
                     new_h = max(10, int(base_template.shape[0] * scale))
-                    # Skip if scaled template is too large or too small
+                    # Skip invalid template sizes
                     if new_w > search_img.shape[1] * 0.8 or new_h > search_img.shape[0] * 0.8:
                         continue
                     if new_w < 5 or new_h < 5:
@@ -86,10 +88,11 @@ class TemplateMatcher:
                 if scaled_template.shape[0] >= search_img.shape[0] or scaled_template.shape[1] >= search_img.shape[1]:
                     continue
 
+                # Generate rotated templates and perform matching
                 templates = rotated_templates(scaled_template)
 
                 for tmpl in templates:
-                    # Skip if rotated template is too large
+                    # Skip oversized rotated templates
                     if tmpl.shape[0] >= search_img.shape[0] or tmpl.shape[1] >= search_img.shape[1]:
                         continue
                     
@@ -99,20 +102,20 @@ class TemplateMatcher:
                         for pt in zip(*loc[::-1]):
                             detected_points.append((pt, tmpl.shape[::-1]))
                     except cv2.error:
-                        # Skip if template matching fails
                         continue
 
+        # Convert detection points to bounding boxes
         boxes = []
         for (pt, (w, h)) in detected_points:
             boxes.append([pt[0], pt[1], pt[0] + w, pt[1] + h])
         
-        # Apply non-maximum suppression to remove overlapping detections
+        # Remove overlapping detections
         if len(boxes) > 0:
             boxes = non_max_suppression_fast(np.array(boxes), 0.3)
         else:
             boxes = []
 
-        # Draw rectangles on a copy of the image
+        # Draw detection results
         detected_img = self.image.copy()
         for (x1, y1, x2, y2) in boxes:
             cv2.rectangle(detected_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
@@ -126,22 +129,69 @@ class ColorSegmentationMatcher:
         self.template = template
         self.params = params
 
+    def apply_watershed(self, mask):
+        """Apply watershed segmentation to separate touching objects"""
+        # Ensure mask is binary
+        mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
+        
+        # Distance transform
+        dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        
+        # Find local maxima with adaptive threshold
+        max_val = dist_transform.max()
+        if max_val < 5:  # If objects are too small, skip watershed
+            return mask
+            
+        # Create more robust seed detection
+        threshold_val = max(3, 0.4 * max_val)
+        local_maxima = dist_transform > threshold_val
+        
+        # Remove small noise seeds
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        local_maxima = cv2.morphologyEx(local_maxima.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+        
+        # Create markers for watershed
+        num_labels, markers = cv2.connectedComponents(local_maxima)
+        
+        # Need at least 2 regions for watershed to be useful
+        if num_labels < 3:  # 1 is background, need at least 2 objects
+            return mask
+        
+        # Add background marker (set boundary pixels to 0)
+        markers = markers + 1  # Shift all labels up by 1
+        markers[mask == 0] = 0  # Background is 0
+        
+        # Apply watershed
+        if len(self.image.shape) == 3:
+            watershed_img = cv2.watershed(self.image, markers.copy())
+        else:
+            # Convert grayscale to 3-channel for watershed
+            temp_img = cv2.cvtColor(self.image, cv2.COLOR_GRAY2BGR)
+            watershed_img = cv2.watershed(temp_img, markers.copy())
+        
+        # Create new mask from watershed result
+        # watershed_img == -1 are the watershed lines (boundaries)
+        # watershed_img > 1 are the separated objects
+        watershed_mask = (watershed_img > 1).astype(np.uint8) * 255
+        
+        return watershed_mask
+
     def detect(self):
         color_tolerance = self.params["color_tolerance"]
         min_area = self.params["min_area"]
         erosion_iterations = self.params["erosion_iterations"]
         dilation_iterations = self.params["dilation_iterations"]
+        use_watershed = self.params.get("use_watershed", False)
         
-        # Get dominant color from the template ROI (use median for robustness)
+        # Extract dominant color from template using median for robustness
         template_bgr = self.template.copy()
         
-        # Calculate color statistics in BGR space (simpler and more reliable)
         b_med = np.median(template_bgr[:, :, 0])
         g_med = np.median(template_bgr[:, :, 1])
         r_med = np.median(template_bgr[:, :, 2])
         
-        # Create color range in BGR space
-        tolerance_bgr = color_tolerance * 3  # Scale tolerance for BGR
+        # Create BGR color range
+        tolerance_bgr = color_tolerance * 3
         lower_bgr = np.array([
             max(0, b_med - tolerance_bgr),
             max(0, g_med - tolerance_bgr),
@@ -153,26 +203,25 @@ class ColorSegmentationMatcher:
             min(255, r_med + tolerance_bgr)
         ])
         
-        # Create mask in BGR color space
+        # Create BGR mask
         mask = cv2.inRange(self.image, lower_bgr, upper_bgr)
         
-        # Also try HSV approach for better color matching
+        # Generate HSV mask for better color matching
         template_hsv = cv2.cvtColor(self.template, cv2.COLOR_BGR2HSV)
         img_hsv = cv2.cvtColor(self.image, cv2.COLOR_BGR2HSV)
         
-        # Get HSV statistics
         h_med = np.median(template_hsv[:, :, 0])
         s_med = np.median(template_hsv[:, :, 1])
         v_med = np.median(template_hsv[:, :, 2])
         
-        # HSV ranges (more conservative)
-        h_tol = min(20, color_tolerance)  # Limit hue tolerance
+        # HSV ranges with conservative tolerances
+        h_tol = min(20, color_tolerance)
         s_tol = color_tolerance * 2
         v_tol = color_tolerance * 2
         
         lower_hsv = np.array([
             max(0, h_med - h_tol),
-            max(30, s_med - s_tol),  # Avoid very low saturation (grayish colors)
+            max(30, s_med - s_tol),  # Avoid grayish colors
             max(30, v_med - v_tol)   # Avoid very dark colors
         ])
         upper_hsv = np.array([
@@ -181,13 +230,12 @@ class ColorSegmentationMatcher:
             min(255, v_med + v_tol)
         ])
         
-        # Create HSV mask
         mask_hsv = cv2.inRange(img_hsv, lower_hsv, upper_hsv)
         
-        # Combine both masks (BGR and HSV) for better results
+        # Combine BGR and HSV masks
         mask_combined = cv2.bitwise_or(mask, mask_hsv)
         
-        # Apply morphological operations to clean up the mask
+        # Apply morphological operations to clean mask
         if erosion_iterations > 0:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             mask_combined = cv2.erode(mask_combined, kernel, iterations=erosion_iterations)
@@ -196,10 +244,16 @@ class ColorSegmentationMatcher:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             mask_combined = cv2.dilate(mask_combined, kernel, iterations=dilation_iterations)
         
-        # Find contours
+        # Apply watershed segmentation if enabled (separates touching objects)
+        if use_watershed:
+            # Apply closing operation before watershed to fill gaps
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            mask_before_watershed = cv2.morphologyEx(mask_combined, cv2.MORPH_CLOSE, kernel)
+            mask_combined = self.apply_watershed(mask_before_watershed)
+        
+        # Find and filter contours
         contours, _ = cv2.findContours(mask_combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter contours and create bounding boxes
         boxes = []
         detected_img = self.image.copy()
         
@@ -209,19 +263,17 @@ class ColorSegmentationMatcher:
         for contour in contours:
             area = cv2.contourArea(contour)
             if area >= min_area:
-                # Get bounding rectangle
                 x, y, w, h = cv2.boundingRect(contour)
                 
-                # Filter out very thin or very wide rectangles (likely noise)
+                # Filter by aspect ratio to remove noise
                 aspect_ratio = w / h
-                if 0.2 <= aspect_ratio <= 5.0:  # Reasonable aspect ratio
+                if 0.2 <= aspect_ratio <= 5.0:
                     boxes.append([x, y, x + w, y + h])
         
-        # Apply non-maximum suppression
+        # Apply non-maximum suppression and draw results
         if len(boxes) > 0:
             boxes = non_max_suppression_fast(np.array(boxes), 0.4)
             
-            # Draw results
             for (x1, y1, x2, y2) in boxes:
                 cv2.rectangle(detected_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
         
