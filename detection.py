@@ -36,7 +36,6 @@ class TemplateMatcher:
             img_edge = cv2.Canny(self.image, 100, 200)
 
         def rotated_templates(template):
-            """Generate rotated versions of template for rotation invariant detection"""
             angles = range(0, 360, 30) if rot_inv else [0]
             if multi_scale and len(scales) > 4:
                 angles = range(0, 360, 45) 
@@ -53,7 +52,6 @@ class TemplateMatcher:
         active_methods = [name for name, use in methods.items() if use]
         
         for method_name in active_methods:
-            # Select appropriate template and search image based on method
             if method_name == "grayscale":
                 base_template = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
                 search_img = img_gray
@@ -64,10 +62,6 @@ class TemplateMatcher:
                 base_template = cv2.Canny(self.template, 100, 200)
                 search_img = img_edge
             else:
-                continue
-
-            # Skip edge templates that are too small
-            if method_name == "edge" and (base_template.shape[0] < 10 or base_template.shape[1] < 10):
                 continue
 
             # Multi-scale template matching
@@ -109,13 +103,12 @@ class TemplateMatcher:
         for (pt, (w, h)) in detected_points:
             boxes.append([pt[0], pt[1], pt[0] + w, pt[1] + h])
         
-        # Remove overlapping detections
+        # Apply non-maximum suppression and draw results
         if len(boxes) > 0:
             boxes = non_max_suppression_fast(np.array(boxes), 0.3)
         else:
             boxes = []
 
-        # Draw detection results
         detected_img = self.image.copy()
         for (x1, y1, x2, y2) in boxes:
             cv2.rectangle(detected_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
@@ -130,47 +123,41 @@ class ColorSegmentationMatcher:
         self.params = params
 
     def apply_watershed(self, mask):
-        """Apply watershed segmentation to separate touching objects"""
-        # Ensure mask is binary
+        
         mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
         
         # Distance transform
         dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         
-        # Find local maxima with adaptive threshold
+        # Find seed points for watershed (object centers)
         max_val = dist_transform.max()
-        if max_val < 5:  # If objects are too small, skip watershed
-            return mask
-            
-        # Create more robust seed detection
         threshold_val = max(3, 0.4 * max_val)
         local_maxima = dist_transform > threshold_val
         
-        # Remove small noise seeds
+        # Clean up noise in seed detection
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         local_maxima = cv2.morphologyEx(local_maxima.astype(np.uint8), cv2.MORPH_OPEN, kernel)
         
-        # Create markers for watershed
+        # Create watershed markers
         num_labels, markers = cv2.connectedComponents(local_maxima)
-        
-        # Need at least 2 regions for watershed to be useful
-        if num_labels < 3:  # 1 is background, need at least 2 objects
+
+        # Skip watershed if only 1 object found (bg + 2 labels)
+        if num_labels < 3:  
             return mask
-        
-        # Add background marker (set boundary pixels to 0)
-        markers = markers + 1  # Shift all labels up by 1
-        markers[mask == 0] = 0  # Background is 0
-        
+
+        # Add background marker (bg = 0, fg = 1)
+        markers = markers + 1
+        markers[mask == 0] = 0
+
         # Apply watershed
         if len(self.image.shape) == 3:
             watershed_img = cv2.watershed(self.image, markers.copy())
         else:
-            # Convert grayscale to 3-channel for watershed
             temp_img = cv2.cvtColor(self.image, cv2.COLOR_GRAY2BGR)
             watershed_img = cv2.watershed(temp_img, markers.copy())
         
         # Create new mask from watershed result
-        # watershed_img == -1 are the watershed lines (boundaries)
+        # watershed_img == -1 are the watershed lines 
         # watershed_img > 1 are the separated objects
         watershed_mask = (watershed_img > 1).astype(np.uint8) * 255
         
@@ -183,7 +170,7 @@ class ColorSegmentationMatcher:
         dilation_iterations = self.params["dilation_iterations"]
         use_watershed = self.params.get("use_watershed", False)
         
-        # Extract dominant color from template using median for robustness
+        # Extract dominant color using median
         template_bgr = self.template.copy()
         
         b_med = np.median(template_bgr[:, :, 0])
@@ -221,8 +208,8 @@ class ColorSegmentationMatcher:
         
         lower_hsv = np.array([
             max(0, h_med - h_tol),
-            max(30, s_med - s_tol),  # Avoid grayish colors
-            max(30, v_med - v_tol)   # Avoid very dark colors
+            max(30, s_med - s_tol),  
+            max(30, v_med - v_tol)   
         ])
         upper_hsv = np.array([
             min(179, h_med + h_tol),
@@ -244,7 +231,7 @@ class ColorSegmentationMatcher:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             mask_combined = cv2.dilate(mask_combined, kernel, iterations=dilation_iterations)
         
-        # Apply watershed segmentation if enabled (separates touching objects)
+        # Apply watershed segmentation if enabled
         if use_watershed:
             # Apply closing operation before watershed to fill gaps
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -257,15 +244,12 @@ class ColorSegmentationMatcher:
         boxes = []
         detected_img = self.image.copy()
         
-        # Sort contours by area (largest first)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)
         
         for contour in contours:
             area = cv2.contourArea(contour)
             if area >= min_area:
                 x, y, w, h = cv2.boundingRect(contour)
-                
-                # Filter by aspect ratio to remove noise
                 aspect_ratio = w / h
                 if 0.2 <= aspect_ratio <= 5.0:
                     boxes.append([x, y, x + w, y + h])
