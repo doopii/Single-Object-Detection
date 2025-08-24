@@ -3,10 +3,115 @@ import numpy as np
 from utils import non_max_suppression_fast
 
 class TemplateMatcher:
-    def __init__(self, image, template, params):
+    def __init__(self, image, template, params, mask=None):
         self.image = image
         self.template = template
         self.params = params
+        self.mask = mask  
+
+    def _generate_scales(self, multi_scale, scale_r):
+        """Generate scale values for multi-scale matching"""
+        if not multi_scale:
+            return [1.0]
+        
+        # Make these configurable later
+        step = self.params.get("scale_step", 0.1)
+        scale_min = max(0.3, 1 - scale_r)
+        scale_max = min(1.7, 1 + scale_r)
+        max_scales = self.params.get("max_scales", 8)
+        
+        scales = np.arange(scale_min, scale_max + step, step)
+        if len(scales) > max_scales:
+            scales = np.linspace(scale_min, scale_max, max_scales)
+        
+        return scales
+
+    def _get_rotation_angles(self, rot_inv, multi_scale, scales):
+        """Get rotation angles based on settings"""
+        if not rot_inv:
+            return [0]
+        
+        # Use configurable rotation step
+        base_step = self.params.get("rotation_step", 30)
+        performance_step = self.params.get("rotation_step_multiscale", 45)
+        
+        step = performance_step if multi_scale and len(scales) > 4 else base_step
+        return range(0, 360, step)
+
+    def _apply_mask_to_template(self, template, method_type):
+        """Apply mask to template based on method type"""
+        if self.mask is None:
+            return template
+            
+        if self.mask.shape[:2] != template.shape[:2]:
+            # Resize mask to match template if needed
+            mask_resized = cv2.resize(self.mask, (template.shape[1], template.shape[0]))
+        else:
+            mask_resized = self.mask
+            
+        masked_template = template.copy()
+        if len(template.shape) == 3:  # Color template
+            masked_template[mask_resized == 0] = [0, 0, 0]
+        else:  # Grayscale template
+            masked_template[mask_resized == 0] = 0
+            
+        return masked_template
+
+    def _prepare_method_data(self, method_name):
+        """Prepare template and search image for specific method"""
+        canny_low = self.params.get("canny_low", 100)
+        canny_high = self.params.get("canny_high", 200)
+        
+        if method_name == "grayscale":
+            template = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
+            search_img = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
+        elif method_name == "color":
+            template = self.template
+            search_img = self.image
+        elif method_name == "edge":
+            template = cv2.Canny(self.template, canny_low, canny_high)
+            search_img = cv2.Canny(self.image, canny_low, canny_high)
+        else:
+            raise ValueError(f"Unknown method: {method_name}")
+            
+        # Apply mask if provided
+        template = self._apply_mask_to_template(template, method_name)
+        
+        return template, search_img
+
+    def _rotated_templates(self, template, rot_inv, multi_scale, scales):
+        """Generate rotated versions of template"""
+        angles = self._get_rotation_angles(rot_inv, multi_scale, scales)
+        
+        for angle in angles:
+            if angle == 0:
+                yield template
+            else:
+                center = (template.shape[1]//2, template.shape[0]//2)
+                M = cv2.getRotationMatrix2D(center, angle, 1)
+                yield cv2.warpAffine(template, M, (template.shape[1], template.shape[0]))
+
+    def _is_valid_template_size(self, template, search_img):
+        """Check if template size is valid for matching"""
+        h, w = template.shape[:2]
+        img_h, img_w = search_img.shape[:2]
+        
+        min_size = self.params.get("min_template_size", 5)
+        max_size_ratio = self.params.get("max_template_ratio", 0.8)
+        
+        # Template must be smaller than search image
+        if h >= img_h or w >= img_w:
+            return False
+        
+        # Skip very small templates
+        if h < min_size or w < min_size:
+            return False
+            
+        # Skip templates that are too large
+        if w > img_w * max_size_ratio or h > img_h * max_size_ratio:
+            return False
+            
+        return True
 
     def detect(self):
         threshold = self.params["threshold"]
@@ -18,76 +123,33 @@ class TemplateMatcher:
         detected_points = []
         method = cv2.TM_CCOEFF_NORMED
 
-        # Configure scale parameters for multi-scale detection
-        scales = [1.0]
-        if multi_scale:
-            step = 0.1 
-            scale_min = max(0.3, 1 - scale_r) 
-            scale_max = min(1.7, 1 + scale_r)  
-            scales = np.arange(scale_min, scale_max + step, step)
-            # Limit scales for performance optimization
-            if len(scales) > 8:
-                scales = np.linspace(scale_min, scale_max, 8)
+        # Generate scales
+        scales = self._generate_scales(multi_scale, scale_r)
 
-        # Pre-process images for different detection methods
-        if methods["grayscale"]:
-            img_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
-        if methods["edge"]:
-            img_edge = cv2.Canny(self.image, 100, 200)
-
-        def rotated_templates(template):
-            angles = range(0, 360, 30) if rot_inv else [0]
-            if multi_scale and len(scales) > 4:
-                angles = range(0, 360, 45) 
-            
-            for angle in angles:
-                if angle == 0:
-                    yield template
-                else:
-                    M = cv2.getRotationMatrix2D((template.shape[1]//2, template.shape[0]//2), angle, 1)
-                    rotated = cv2.warpAffine(template, M, (template.shape[1], template.shape[0]))
-                    yield rotated
-
-        # Process each enabled detection method
         active_methods = [name for name, use in methods.items() if use]
         
         for method_name in active_methods:
-            if method_name == "grayscale":
-                base_template = cv2.cvtColor(self.template, cv2.COLOR_BGR2GRAY)
-                search_img = img_gray
-            elif method_name == "color":
-                base_template = self.template
-                search_img = self.image
-            elif method_name == "edge":
-                base_template = cv2.Canny(self.template, 100, 200)
-                search_img = img_edge
-            else:
-                continue
+            # Just-in-time preprocessing for each method
+            base_template, search_img = self._prepare_method_data(method_name)
 
             # Multi-scale template matching
             for scale in scales:
+                # Scale template if needed
                 if scale != 1.0:
                     new_w = max(10, int(base_template.shape[1] * scale))
                     new_h = max(10, int(base_template.shape[0] * scale))
-                    # Skip invalid template sizes
-                    if new_w > search_img.shape[1] * 0.8 or new_h > search_img.shape[0] * 0.8:
-                        continue
-                    if new_w < 5 or new_h < 5:
-                        continue
                     scaled_template = cv2.resize(base_template, (new_w, new_h))
                 else:
                     scaled_template = base_template
 
-                # Skip if template is larger than search image
-                if scaled_template.shape[0] >= search_img.shape[0] or scaled_template.shape[1] >= search_img.shape[1]:
+                # Skip invalid template sizes
+                if not self._is_valid_template_size(scaled_template, search_img):
                     continue
 
                 # Generate rotated templates and perform matching
-                templates = rotated_templates(scaled_template)
-
-                for tmpl in templates:
+                for tmpl in self._rotated_templates(scaled_template, rot_inv, multi_scale, scales):
                     # Skip oversized rotated templates
-                    if tmpl.shape[0] >= search_img.shape[0] or tmpl.shape[1] >= search_img.shape[1]:
+                    if not self._is_valid_template_size(tmpl, search_img):
                         continue
                     
                     try:
@@ -104,8 +166,9 @@ class TemplateMatcher:
             boxes.append([pt[0], pt[1], pt[0] + w, pt[1] + h])
         
         # Apply non-maximum suppression and draw results
+        nms_threshold = self.params.get("nms_threshold", 0.3)
         if len(boxes) > 0:
-            boxes = non_max_suppression_fast(np.array(boxes), 0.3)
+            boxes = non_max_suppression_fast(np.array(boxes), nms_threshold)
         else:
             boxes = []
 
@@ -113,8 +176,20 @@ class TemplateMatcher:
         for (x1, y1, x2, y2) in boxes:
             cv2.rectangle(detected_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
 
-        return boxes, detected_img
+        # Create debug info
+        debug_info = {
+            "method": "Template Matching",
+            "image_shape": f"{self.image.shape[1]}x{self.image.shape[0]}",
+            "template_shape": f"{self.template.shape[1]}x{self.template.shape[0]}",
+            "threshold": threshold,
+            "multi_scale": multi_scale,
+            "rotation_invariant": rot_inv,
+            "mask_applied": self.mask is not None,
+            "raw_detections": len(detected_points),
+            "final_detections": len(boxes)
+        }
 
+        return boxes, detected_img, debug_info
 
 class ColorSegmentationMatcher:
     def __init__(self, image, template, params):
@@ -138,7 +213,6 @@ class ColorSegmentationMatcher:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         local_maxima = cv2.morphologyEx(local_maxima.astype(np.uint8), cv2.MORPH_OPEN, kernel)
         
-        # Create watershed markers
         num_labels, markers = cv2.connectedComponents(local_maxima)
 
         # Skip watershed if only 1 object found (bg + 2 labels)
@@ -255,10 +329,23 @@ class ColorSegmentationMatcher:
                     boxes.append([x, y, x + w, y + h])
         
         # Apply non-maximum suppression and draw results
+        raw_detections = len(boxes)
         if len(boxes) > 0:
             boxes = non_max_suppression_fast(np.array(boxes), 0.4)
             
             for (x1, y1, x2, y2) in boxes:
                 cv2.rectangle(detected_img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
         
-        return boxes, detected_img
+        # Create debug info
+        debug_info = {
+            "method": "Color Segmentation",
+            "image_shape": f"{self.image.shape[1]}x{self.image.shape[0]}",
+            "template_shape": f"{self.template.shape[1]}x{self.template.shape[0]}",
+            "color_tolerance": color_tolerance,
+            "min_area": min_area,
+            "use_watershed": use_watershed,
+            "raw_detections": raw_detections,
+            "final_detections": len(boxes)
+        }
+        
+        return boxes, detected_img, debug_info
